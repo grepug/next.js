@@ -8,6 +8,7 @@ import {
   BUILD_MANIFEST,
   REACT_LOADABLE_MANIFEST,
   ROUTES_MANIFEST,
+  SERVER_PROPS_ID,
 } from '../../../next-server/lib/constants'
 import { isDynamicRoute } from '../../../next-server/lib/router/utils'
 import { __ApiPreviewProps } from '../../../next-server/server/api-utils'
@@ -61,20 +62,20 @@ const nextServerlessLoader: loader.Loader = function() {
   )
 
   const runtimeConfigImports = runtimeConfig
-    ? `
+    ? /*javascript*/ `
       const { setConfig } = require('next/config')
     `
     : ''
 
   const runtimeConfigSetter = runtimeConfig
-    ? `
+    ? /*javascript*/ `
       const runtimeConfig = ${runtimeConfig}
       setConfig(runtimeConfig)
     `
     : 'const runtimeConfig = {}'
 
   const dynamicRouteImports = pageIsDynamicRoute
-    ? `
+    ? /*javascript*/ `
     const { getRouteMatcher } = require('next/dist/next-server/lib/router/utils/route-matcher');
       const { getRouteRegex } = require('next/dist/next-server/lib/router/utils/route-regex');
   `
@@ -86,12 +87,12 @@ const nextServerlessLoader: loader.Loader = function() {
   `
     : ''
 
-  const rewriteImports = `
+  const rewriteImports = /*javascript*/ `
     const { rewrites } = require('${routesManifest}')
     const { pathToRegexp, default: pathMatch } = require('next/dist/next-server/server/lib/path-match')
   `
 
-  const handleRewrites = `
+  const handleRewrites = /*javascript*/ `
     const getCustomRouteMatcher = pathMatch(true)
     const {prepareDestination} = require('next/dist/next-server/server/router')
 
@@ -115,7 +116,7 @@ const nextServerlessLoader: loader.Loader = function() {
           }
           ${
             pageIsDynamicRoute
-              ? `
+              ? /*javascript*/ `
             const dynamicParams = dynamicRouteMatcher(parsedUrl.pathname);\
             if (dynamicParams) {
               parsedUrl.query = {
@@ -135,7 +136,7 @@ const nextServerlessLoader: loader.Loader = function() {
   `
 
   if (page.match(API_ROUTE)) {
-    return `
+    return /*javascript*/ `
       import initServer from 'next-plugin-loader?middleware=on-init-server!'
       import onError from 'next-plugin-loader?middleware=on-error-server!'
       ${runtimeConfigImports}
@@ -160,7 +161,7 @@ const nextServerlessLoader: loader.Loader = function() {
 
           ${
             basePath
-              ? `
+              ? /*javascript*/ `
           if(req.url.startsWith('${basePath}')) {
             req.url = req.url.replace('${basePath}', '')
           }
@@ -199,7 +200,7 @@ const nextServerlessLoader: loader.Loader = function() {
       }
     `
   } else {
-    return `
+    return /*javascript*/ `
     import initServer from 'next-plugin-loader?middleware=on-init-server!'
     import onError from 'next-plugin-loader?middleware=on-error-server!'
     ${runtimeConfigImports}
@@ -244,7 +245,7 @@ const nextServerlessLoader: loader.Loader = function() {
       const fromExport = renderMode === 'export' || renderMode === true;
       ${
         basePath
-          ? `
+          ? /*javascript*/ `
       if(req.url.startsWith('${basePath}')) {
         req.url = req.url.replace('${basePath}', '')
       }
@@ -311,7 +312,7 @@ const nextServerlessLoader: loader.Loader = function() {
           // removing reliance on `req.url` and using `req.query` instead
           // (which is needed for "custom routes" anyway).
           pageIsDynamicRoute
-            ? `const nowParams = req.headers && req.headers["x-now-route-matches"]
+            ? /*javascript*/ `const nowParams = req.headers && req.headers["x-now-route-matches"]
               ? getRouteMatcher(
                   (function() {
                     const { re, groups } = getRouteRegex("${page}");
@@ -346,11 +347,52 @@ const nextServerlessLoader: loader.Loader = function() {
         const previewData = tryGetPreviewData(req, res, options.previewProps)
         const isPreviewMode = previewData !== false
 
-        let result = await renderToHTML(req, res, "${page}", Object.assign({}, getStaticProps ? { ...(parsedUrl.query.amp ? { amp: '1' } : {}) } : parsedUrl.query, nowParams ? nowParams : params, _params, isFallback ? { __nextFallback: 'true' } : {}), renderOpts)
+        let result
+        let query = Object.assign(
+          {},
+          getStaticProps
+            ? { ...(parsedUrl.query.amp ? { amp: '1' } : {}) }
+            : parsedUrl.query,
+          nowParams ? nowParams : params,
+          _params,
+          isFallback ? { __nextFallback: 'true' } : {}
+        )
+
+        if (!_nextData) {
+          result = await renderToHTML(
+            req,
+            res,
+            '${page}',
+           query,
+            renderOpts
+          )
+        }
 
         if (!renderMode) {
           if (_nextData || getStaticProps || getServerSideProps) {
-            sendPayload(res, _nextData ? JSON.stringify(renderOpts.pageData) : result, _nextData ? 'json' : 'html', {
+            let payload = result
+
+            if (_nextData) {
+
+              // TODO what is renderOpts.pageData
+              if (renderOpts.pageData) {
+                payload = JSON.stringify(renderOpts.pageData)
+              }
+
+              if (getServerSideProps) {
+                // req.url = parsedUrl.pathname;
+                const params = '${pageIsDynamicRoute}' ? renderOpts.params : undefined;
+
+                let data = await getServerSideProps({ req, res, query, params, isClientTransition: true })
+
+                payload = JSON.stringify({
+                  pageProps: data.props,
+                  ['${SERVER_PROPS_ID}']: true,
+                });
+              }
+            }
+
+            sendPayload(res, payload, _nextData ? 'json' : 'html', {
               private: isPreviewMode,
               stateful: !!getServerSideProps,
               revalidate: renderOpts.revalidate,
